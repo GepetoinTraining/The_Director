@@ -1,7 +1,7 @@
+// src/lib/storage.ts
 import { db } from '../db';
 import { projects, events } from '../db/schema';
-import { eq, asc, desc } from 'drizzle-orm';
-import { nanoid } from 'nanoid';
+import { eq, asc } from 'drizzle-orm';
 
 // --- PROJECT MANAGEMENT ---
 
@@ -53,13 +53,19 @@ export async function getProjectHistory(projectId: string) {
   // Map back to UI/AI format
   return rows.map(row => ({
     id: row.id.toString(),
-    role: mapSourceToRole(row.source), // Helper needed
+    role: mapSourceToRole(row.source),
     content: row.content,
     source: row.source, // Keep original source for UI
     type: row.type,
     metadata: row.metadata ? JSON.parse(row.metadata) : null,
     createdAt: row.createdAt
   }));
+}
+
+// --- MAINTENANCE ---
+
+export async function clearProjectHistory(projectId: string) {
+  db.delete(events).where(eq(events.projectId, projectId)).run();
 }
 
 function mapSourceToRole(source: string) {

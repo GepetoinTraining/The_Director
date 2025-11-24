@@ -27,7 +27,6 @@ interface ProducerPanelProps {
   clearHistory: () => void;
   messages: any[];
   retryStep: (index: number) => void;
-  sendMessage: (text: string) => void;
 }
 
 export default function ProducerPanel({
@@ -40,7 +39,6 @@ export default function ProducerPanel({
   clearHistory,
   messages,
   retryStep,
-  sendMessage
 }: ProducerPanelProps) {
 
   // Helper to extract text safely from Vercel AI SDK messages
@@ -97,6 +95,13 @@ export default function ProducerPanel({
                   )}
                 </div>
               ))}
+              
+              {/* Hint for the user */}
+              {!manifest && messages.length > 0 && (
+                <div className="mt-4 p-2 border border-dashed border-zinc-800 rounded text-[10px] text-zinc-600 text-center">
+                  Use "THE ROOM" console below to reply.
+                </div>
+              )}
             </div>
 
             {/* Layer 2: Producer Checklist Overlay */}
@@ -130,21 +135,6 @@ export default function ProducerPanel({
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-
-            {/* Input Area (Hidden in Producer Mode) */}
-            {!manifest && (
-              <div className="p-2 border-t border-zinc-800 bg-zinc-950">
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const target = e.target as HTMLFormElement;
-                  const input = target.elements.namedItem('message') as HTMLInputElement;
-                  if (input.value.trim()) sendMessage(input.value);
-                  input.value = '';
-                }}>
-                  <input name="message" className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-white focus:border-blue-500 outline-none" placeholder="Command the Director..." />
-                </form>
               </div>
             )}
           </div>

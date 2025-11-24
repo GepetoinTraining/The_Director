@@ -41,7 +41,7 @@ export default function DirectorConsole() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [isProducerBusy, setIsProducerBusy] = useState(false);
   const [roomLogs, setRoomLogs] = useState<LogEntry[]>([]);
-  const [activeExpert, setActiveExpert] = useState<string | null>(null); 
+  const [activeExpert, setActiveExpert] = useState<string | null>('DIRECTOR'); 
   const producerQueueRef = useRef<boolean>(false); 
 
   // --- LOGGING SYSTEM ---
@@ -55,51 +55,36 @@ export default function DirectorConsole() {
     }]);
   };
 
-  // --- 1. DIRECTOR AGENT (The Vision) ---
-  // DESTRUCTURED for safety
+  // --- UNIFIED AGENT (THE ROOM) ---
   const { 
-    append: directorAppend, 
-    messages: directorMessages, 
-    setMessages: setDirectorMessages,
-    isLoading: isDirectorLoading 
+    append: roomAppend, 
+    messages: roomMessages, 
+    isLoading: isRoomLoading 
   } = useChat({
-    api: '/api/chat',
-    onError: (e) => addLog('SYSTEM', `Director Error: ${e.message}`, 'error'),
+    api: '/api/room', 
+    id: 'the-room-v2', // <--- CHANGED: Forces a fresh hook instance
+    onError: (e) => addLog('SYSTEM', `Room Error: ${e.message}`, 'error'),
     onFinish: (msg) => {
-      // Detect Manifest
-      if (msg.role === 'assistant' && !manifest) {
+      // Manifest Detection (Director Logic)
+      if (msg.role === 'assistant') {
         const text = msg.content;
-        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-        if (jsonMatch) {
+        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/\{[\s\S]*\}/);
+        if (jsonMatch && !manifest) {
           try {
-            const data = JSON.parse(jsonMatch[1]);
+            const jsonStr = jsonMatch[1] || jsonMatch[0];
+            const data = JSON.parse(jsonStr);
             if (data.type === 'manifest') {
               addLog('DIRECTOR', 'Manifest generated. Transferring control to Producer.', 'success');
               setManifest({ ...data, steps: data.steps.map((s:any) => ({ ...s, status: 'pending' })) });
+              setActiveExpert('EXPERT'); // Switch default context
             }
-          } catch (e) { console.error(e); }
+          } catch (e) { /* Not a manifest */ }
         }
       }
     }
   });
 
-  // --- 2. EXPERT AGENT (The Room Lifeline) ---
-  const {
-    append: expertAppend,
-    isLoading: isExpertLoading
-  } = useChat({
-    api: '/api/expert',
-    id: 'expert-channel',
-    body: { 
-        // Pass current context to the expert
-        context: manifest?.steps.find(s => s.status === 'running') || { status: 'IDLE' }
-    },
-    onFinish: (msg) => {
-      addLog('EXPERT', msg.content, 'info');
-    }
-  });
-
-  // --- 3. PRODUCER ENGINE (The Executor) ---
+  // --- PRODUCER ENGINE (The Executor) ---
   useEffect(() => {
     if (!manifest || isProducerBusy || producerQueueRef.current) return;
 
@@ -124,47 +109,52 @@ export default function DirectorConsole() {
     newSteps[index].status = 'running';
     setManifest({ ...manifest, steps: newSteps });
 
-    // Open The Room Channel
-    const expertRole = getExpertRole(step.action);
-    setActiveExpert(expertRole);
     addLog('PRODUCER', `Initiating Task: ${step.description}`, 'info');
-    addLog('PRODUCER', `Channel Open: ${expertRole}`, 'command');
 
-    // Execute (Silent request to Director API)
-    const prompt = `[PRODUCER_MODE] Execute: ${step.action} with params: ${JSON.stringify(step.params)}`;
-    try {
-      await directorAppend({ role: 'user', content: prompt });
-    } catch (e) {
-      addLog('PRODUCER', 'Execution Failed', 'error');
+    // Execute via Room (Using Tagging to force Director execution)
+    // SAFEGUARD: Check if roomAppend exists before calling
+    if (roomAppend) {
+      const prompt = `[PRODUCER_MODE] @director Execute: ${step.action} with params: ${JSON.stringify(step.params)}`;
+      try {
+          await roomAppend({ role: 'user', content: prompt });
+      } catch (e: any) {
+        addLog('PRODUCER', `Execution Failed: ${e.message}`, 'error');
+        setIsProducerBusy(false);
+        producerQueueRef.current = false;
+      }
+    } else {
+      addLog('SYSTEM', 'Connection lost. Retrying step...', 'error');
       setIsProducerBusy(false);
       producerQueueRef.current = false;
     }
   };
 
-  // Listen for Tool Results to update Producer
+  // Listen for Tool Results
   useEffect(() => {
     if (!producerQueueRef.current || !manifest) return;
 
-    const lastMsg = directorMessages[directorMessages.length - 1];
-    if (!lastMsg || isDirectorLoading) return;
+    const lastMsg = roomMessages[roomMessages.length - 1];
+    if (!lastMsg || isRoomLoading) return;
 
-    // Look for tool calls
     const runningIdx = manifest.steps.findIndex(s => s.status === 'running');
     if (runningIdx !== -1) {
-        const newSteps = [...manifest.steps];
-        newSteps[runningIdx].status = 'completed';
-        setManifest({ ...manifest, steps: newSteps });
+        const hasToolResult = lastMsg.parts?.some(p => p.type === 'tool-invocation');
         
-        addLog('PRODUCER', `Task Complete: ${manifest.steps[runningIdx].action}`, 'success');
-        setIsProducerBusy(false);
-        producerQueueRef.current = false;
-        setActiveExpert(null); // Close Channel
+        if (hasToolResult || lastMsg.content) { 
+            const newSteps = [...manifest.steps];
+            newSteps[runningIdx].status = 'completed';
+            setManifest({ ...manifest, steps: newSteps });
+            
+            addLog('PRODUCER', `Task Complete: ${manifest.steps[runningIdx].action}`, 'success');
+            setIsProducerBusy(false);
+            producerQueueRef.current = false;
+        }
     }
-  }, [directorMessages, isDirectorLoading]);
+  }, [roomMessages, isRoomLoading]);
 
   // --- 4. PREVIEW SYNC ---
   useEffect(() => {
-    const reversedMessages = [...directorMessages].reverse();
+    const reversedMessages = [...roomMessages].reverse();
     for (const m of reversedMessages) {
       if (m.parts) {
         for (const part of m.parts) {
@@ -181,44 +171,37 @@ export default function DirectorConsole() {
         }
       }
     }
-  }, [directorMessages, latestVideo]);
+  }, [roomMessages, latestVideo]);
 
-  // --- UTILS & HANDLERS ---
-  const getExpertRole = (action: string) => {
-    if (action.includes('Voice')) return 'AUDIO ENGINEER';
-    if (action.includes('Image')) return 'VISUAL RESEARCHER';
-    if (action.includes('render')) return 'EDITOR';
-    return 'ASSISTANT';
-  };
-
+  // --- UTILS ---
   const handleRoomMessage = async (text: string) => {
     addLog('USER', text, 'info');
-    if (activeExpert) {
-        // Route to Expert Agent
-        await expertAppend({ role: 'user', content: text });
+    
+    // DEFENSIVE CHECK: Ensure hook is ready
+    if (!roomAppend) {
+        addLog('SYSTEM', 'System initializing... please wait.', 'error');
+        return;
     }
-  };
 
-  const handleDirectorMessage = async (text: string) => {
-    // Director chat is only for Phase 1 (Planning)
-    if (!manifest) {
-        await directorAppend({ role: 'user', content: text });
-    }
+    // The Backend Router (`/api/room`) now decides who answers based on state
+    await roomAppend({ role: 'user', content: text });
   };
 
   const clearHistory = () => {
     fetch('/api/chat/history', { method: 'DELETE' });
-    setDirectorMessages([]);
+    // We can't clear useChat messages directly without reloading in this SDK version usually, 
+    // but we can reset local state.
     setRoomLogs([]);
     setManifest(null);
     setLatestVideo(null);
     setCurrentSpec(null);
+    setActiveExpert('DIRECTOR');
+    window.location.reload(); // Simplest way to reset useChat hook state
   };
 
   return (
     <div className="flex h-screen bg-black text-zinc-200 font-sans overflow-hidden">
       
-      {/* COL 1: DIRECTOR / PRODUCER */}
       <ProducerPanel 
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -227,15 +210,11 @@ export default function DirectorConsole() {
         viewMode={viewMode}
         setViewMode={setViewMode}
         clearHistory={clearHistory}
-        messages={directorMessages}
-        retryStep={(i) => { /* retry logic */ }}
-        sendMessage={handleDirectorMessage}
+        messages={roomMessages}
+        retryStep={() => {}}
       />
 
-      {/* COL 2 & 3 CONTAINER */}
       <div className="flex-1 flex flex-col min-w-0 relative">
-        
-        {/* TOP: EDITOR & PREVIEW */}
         <div className="flex-1 flex min-h-0">
             <div className="flex-1 flex flex-col bg-zinc-900/50 border-r border-zinc-800 min-w-0">
                 <SpecEditor 
@@ -251,14 +230,12 @@ export default function DirectorConsole() {
             />
         </div>
 
-        {/* BOTTOM: THE ROOM (CONSOLE) */}
         <TheRoom 
             logs={roomLogs}
             activeExpert={activeExpert}
             onSendMessage={handleRoomMessage}
-            isTyping={isExpertLoading}
+            isTyping={isRoomLoading}
         />
-
       </div>
     </div>
   );

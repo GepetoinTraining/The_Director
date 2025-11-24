@@ -3,7 +3,8 @@ import { Terminal, Mic, MessageSquare, Activity, XCircle } from 'lucide-react';
 
 interface LogEntry {
   id: string;
-  source: 'PRODUCER' | 'DIRECTOR' | 'EXPERT' | 'SYSTEM';
+  // UPDATED: Added 'USER' to the source type definition to match page.tsx
+  source: 'PRODUCER' | 'DIRECTOR' | 'EXPERT' | 'SYSTEM' | 'USER';
   message: string;
   timestamp: number;
   type: 'info' | 'success' | 'error' | 'command';
@@ -14,9 +15,11 @@ interface TheRoomProps {
   logs: LogEntry[];
   activeExpert: string | null; // e.g., 'AUDIO_ENGINEER', 'VISUAL_RESEARCHER'
   onSendMessage: (text: string, expertId: string) => void;
+  // Added optional prop to handle the loading state passed from page.tsx
+  isTyping?: boolean; 
 }
 
-export default function TheRoom({ logs, activeExpert, onSendMessage }: TheRoomProps) {
+export default function TheRoom({ logs, activeExpert, onSendMessage, isTyping }: TheRoomProps) {
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -31,7 +34,9 @@ export default function TheRoom({ logs, activeExpert, onSendMessage }: TheRoomPr
     e.preventDefault();
     if (!input.trim()) return;
     
-    // If no expert is active, we default to Director or System
+    // If no expert is active, we default to Director or System (handled in page.tsx)
+    // We pass 'DIRECTOR' as a placeholder if activeExpert is null, 
+    // though page.tsx logic ultimately decides routing.
     const target = activeExpert || 'DIRECTOR';
     onSendMessage(input, target);
     setInput('');
@@ -72,7 +77,8 @@ export default function TheRoom({ logs, activeExpert, onSendMessage }: TheRoomPr
             <span className={`w-[80px] shrink-0 font-bold ${
               log.source === 'PRODUCER' ? 'text-yellow-500' :
               log.source === 'DIRECTOR' ? 'text-blue-500' :
-              log.source === 'EXPERT' ? 'text-purple-500' : 'text-zinc-500'
+              log.source === 'EXPERT' ? 'text-purple-500' : 
+              log.source === 'USER' ? 'text-cyan-500' : 'text-zinc-500'
             }`}>
               [{log.source}]
             </span>
@@ -85,6 +91,13 @@ export default function TheRoom({ logs, activeExpert, onSendMessage }: TheRoomPr
             </span>
           </div>
         ))}
+        {isTyping && (
+           <div className="flex gap-3 px-2 animate-pulse">
+              <span className="text-zinc-600 w-[60px] shrink-0">...</span>
+              <span className="text-purple-500 w-[80px] shrink-0 font-bold">[EXPERT]</span>
+              <span className="text-zinc-500">Typing...</span>
+           </div>
+        )}
       </div>
 
       {/* Input Line */}
