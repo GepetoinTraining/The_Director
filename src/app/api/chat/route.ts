@@ -30,7 +30,7 @@ export async function POST(req: Request) {
 
   // 3. EXECUTION (THE BRAIN)
   const result = await streamText({
-    model: google('gemini-2.0-flash-001'), 
+    model: google('gemini-2.5-flash'), 
     messages: coreMessages, // <--- USE SANITIZED MESSAGES HERE
     system: DIRECTOR_SYSTEM_PROMPT,
     tools: DIRECTOR_TOOLS,

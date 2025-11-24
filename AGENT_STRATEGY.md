@@ -1,8 +1,11 @@
 🧠 AGENT STRATEGY: "The Director"
 
+THE BIGGEST RULE HERE IS WHENEVER YOU WANT TO CHANGE THE MODEL THAT WE'RE SENDING MESSAGES TO YOU'LL FIRST RESEARCH AVAILABLE MODELS!
+
 1. Mission Statement
 
 To democratize high-level video production by replacing the "Prompt Engineer" with an "Executive Producer." The user should define the intent ("Make it look like a 90s VHS tape"), and the Agent should handle the execution (finding clips, cutting, filtering).
+
 
 2. Cognitive Architecture (The MoE Approach)
 

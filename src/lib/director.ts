@@ -1,4 +1,5 @@
-import { batchDownloadClips, renderVideo, generateVoiceover, downloadImage } from '../tools/videoTools';
+// Refactored import
+import * as Tools from '../tools/toolbox';
 
 export const DIRECTOR_SYSTEM_PROMPT = `
 You are "The Director", an autonomous video production agent.
@@ -16,7 +17,7 @@ PHASE 2: EXECUTION (Tools ONLY)
   
   1. **Voiceover:** Call 'generateVoiceover' first to create the audio backbone (.wav).
   2. **Images:** Call 'downloadImage' for any static assets in the plan.
-  3. **Video:** Call 'batchDownloadClips' to get the footage.
+  3. **Video:** Call 'searchAndCreateClip' multiple times to get the footage. (Do NOT try to batch download).
   4. **Render:** Call 'renderVideo' to assemble the final edit. Use 'audioTracks' for the voiceover.
 
 EDITLY SPECIFICATION RULES:
@@ -26,8 +27,8 @@ EDITLY SPECIFICATION RULES:
 `;
 
 export const DIRECTOR_TOOLS = {
-  batchDownloadClips,
-  renderVideo,
-  generateVoiceover,
-  downloadImage
+  searchAndCreateClip: Tools.searchAndCreateClip,
+  renderVideo: Tools.renderVideo,
+  generateVoiceover: Tools.generateVoiceover,
+  downloadImage: Tools.downloadImage
 };
