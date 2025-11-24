@@ -1,6 +1,5 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import editly from 'editly';
 import path from 'path';
 import { ensureDir } from './utils';
 
@@ -66,6 +65,13 @@ export const renderVideo = tool({
     console.log("🎬 Rendering started...");
 
     try {
+      // FIX: Dynamic Import with explicit type handling
+      // We use a dynamic import to prevent server crash on startup.
+      // We cast to 'any' to ignore TypeScript errors about the module structure.
+      const editlyModule = await import('editly');
+      // @ts-ignore
+      const editly = editlyModule.default || editlyModule;
+
       const sanitizedClips = spec.clips.map((clip: any) => {
         if (clip.layers) {
           clip.layers = clip.layers.map((layer: any) => {
