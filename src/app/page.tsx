@@ -1,67 +1,170 @@
 'use client';
 
 import { useChat } from '@ai-sdk/react';
-import { useState, useEffect } from 'react';
-import { Terminal, FolderOpen, Play, Trash2, Eye, EyeOff } from 'lucide-react';
-import { DefaultChatTransport } from 'ai';
-import FileExplorer from '../components/FileExplorer';
+import { useState, useEffect, useRef } from 'react';
+import ProducerPanel from '../components/ProducerPanel';
 import SpecEditor from '../components/SpecEditor';
+import PreviewPanel from '../components/PreviewPanel';
+import TheRoom from '../components/TheRoom';
+
+// --- TYPES ---
+type LogEntry = {
+  id: string;
+  source: 'PRODUCER' | 'DIRECTOR' | 'EXPERT' | 'SYSTEM' | 'USER';
+  message: string;
+  timestamp: number;
+  type: 'info' | 'success' | 'error' | 'command';
+};
+
+type Step = {
+  id: string;
+  action: string;
+  description: string;
+  params: any;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+};
+
+type Manifest = {
+  title: string;
+  steps: Step[];
+};
 
 export default function DirectorConsole() {
+  // --- STATE ---
   const [activeTab, setActiveTab] = useState<'chat' | 'files'>('chat');
+  const [viewMode, setViewMode] = useState<'full' | 'clean'>('full');
   const [currentSpec, setCurrentSpec] = useState<any>(null);
   const [latestVideo, setLatestVideo] = useState<string | null>(null);
   const [videoKey, setVideoKey] = useState(0);
-  const [inputValue, setInputValue] = useState('');
   
-  // NEW: View Mode State
-  const [viewMode, setViewMode] = useState<'full' | 'clean'>('full');
+  // --- SWARM STATE ---
+  const [manifest, setManifest] = useState<Manifest | null>(null);
+  const [isProducerBusy, setIsProducerBusy] = useState(false);
+  const [roomLogs, setRoomLogs] = useState<LogEntry[]>([]);
+  const [activeExpert, setActiveExpert] = useState<string | null>(null); 
+  const producerQueueRef = useRef<boolean>(false); 
 
-  const { messages, status, sendMessage, setMessages, reload } = useChat({
-    transport: new DefaultChatTransport({
-      api: '/api/chat',
-    }),
-    onError: (e) => console.error("Chat Error:", e),
-  });
-
-  const isLoading = status === 'streaming' || status === 'submitted';
-
-  // Load History with Filtering Strategy
-  const fetchHistory = (mode: 'full' | 'clean') => {
-    fetch(`/api/chat/history?view=${mode}`)
-      .then(res => res.json())
-      .then(data => {
-        if (Array.isArray(data)) {
-          setMessages(data);
-        }
-      });
+  // --- LOGGING SYSTEM ---
+  const addLog = (source: LogEntry['source'], message: string, type: LogEntry['type'] = 'info') => {
+    setRoomLogs(prev => [...prev, {
+      id: Math.random().toString(36),
+      timestamp: Date.now(),
+      source,
+      message,
+      type
+    }]);
   };
 
-  // Initial Load
-  useEffect(() => {
-    fetchHistory(viewMode);
-  }, []); // Only run on mount
+  // --- 1. DIRECTOR AGENT (The Vision) ---
+  // DESTRUCTURED for safety
+  const { 
+    append: directorAppend, 
+    messages: directorMessages, 
+    setMessages: setDirectorMessages,
+    isLoading: isDirectorLoading 
+  } = useChat({
+    api: '/api/chat',
+    onError: (e) => addLog('SYSTEM', `Director Error: ${e.message}`, 'error'),
+    onFinish: (msg) => {
+      // Detect Manifest
+      if (msg.role === 'assistant' && !manifest) {
+        const text = msg.content;
+        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+        if (jsonMatch) {
+          try {
+            const data = JSON.parse(jsonMatch[1]);
+            if (data.type === 'manifest') {
+              addLog('DIRECTOR', 'Manifest generated. Transferring control to Producer.', 'success');
+              setManifest({ ...data, steps: data.steps.map((s:any) => ({ ...s, status: 'pending' })) });
+            }
+          } catch (e) { console.error(e); }
+        }
+      }
+    }
+  });
 
-  // Handle Mode Toggle
-  const toggleViewMode = () => {
-    const newMode = viewMode === 'full' ? 'clean' : 'full';
-    setViewMode(newMode);
-    // If we are NOT streaming, we can fetch the filtered history from server
-    if (status === 'ready') {
-      fetchHistory(newMode);
+  // --- 2. EXPERT AGENT (The Room Lifeline) ---
+  const {
+    append: expertAppend,
+    isLoading: isExpertLoading
+  } = useChat({
+    api: '/api/expert',
+    id: 'expert-channel',
+    body: { 
+        // Pass current context to the expert
+        context: manifest?.steps.find(s => s.status === 'running') || { status: 'IDLE' }
+    },
+    onFinish: (msg) => {
+      addLog('EXPERT', msg.content, 'info');
+    }
+  });
+
+  // --- 3. PRODUCER ENGINE (The Executor) ---
+  useEffect(() => {
+    if (!manifest || isProducerBusy || producerQueueRef.current) return;
+
+    const nextStepIdx = manifest.steps.findIndex(s => s.status === 'pending');
+    if (nextStepIdx === -1) {
+      addLog('PRODUCER', 'Production Wrap. All tasks complete.', 'success');
+      return; 
+    }
+
+    executeStep(nextStepIdx);
+  }, [manifest, isProducerBusy]);
+
+  const executeStep = async (index: number) => {
+    if (!manifest) return;
+    setIsProducerBusy(true);
+    producerQueueRef.current = true;
+
+    const step = manifest.steps[index];
+    
+    // UI Update
+    const newSteps = [...manifest.steps];
+    newSteps[index].status = 'running';
+    setManifest({ ...manifest, steps: newSteps });
+
+    // Open The Room Channel
+    const expertRole = getExpertRole(step.action);
+    setActiveExpert(expertRole);
+    addLog('PRODUCER', `Initiating Task: ${step.description}`, 'info');
+    addLog('PRODUCER', `Channel Open: ${expertRole}`, 'command');
+
+    // Execute (Silent request to Director API)
+    const prompt = `[PRODUCER_MODE] Execute: ${step.action} with params: ${JSON.stringify(step.params)}`;
+    try {
+      await directorAppend({ role: 'user', content: prompt });
+    } catch (e) {
+      addLog('PRODUCER', 'Execution Failed', 'error');
+      setIsProducerBusy(false);
+      producerQueueRef.current = false;
     }
   };
 
-  const clearHistory = async () => {
-    await fetch('/api/chat/history', { method: 'DELETE' });
-    setMessages([]);
-    setLatestVideo(null);
-    setCurrentSpec(null);
-  };
-
-  // Smart State Sync (Detecting the Render Tool Result)
+  // Listen for Tool Results to update Producer
   useEffect(() => {
-    const reversedMessages = [...messages].reverse();
+    if (!producerQueueRef.current || !manifest) return;
+
+    const lastMsg = directorMessages[directorMessages.length - 1];
+    if (!lastMsg || isDirectorLoading) return;
+
+    // Look for tool calls
+    const runningIdx = manifest.steps.findIndex(s => s.status === 'running');
+    if (runningIdx !== -1) {
+        const newSteps = [...manifest.steps];
+        newSteps[runningIdx].status = 'completed';
+        setManifest({ ...manifest, steps: newSteps });
+        
+        addLog('PRODUCER', `Task Complete: ${manifest.steps[runningIdx].action}`, 'success');
+        setIsProducerBusy(false);
+        producerQueueRef.current = false;
+        setActiveExpert(null); // Close Channel
+    }
+  }, [directorMessages, isDirectorLoading]);
+
+  // --- 4. PREVIEW SYNC ---
+  useEffect(() => {
+    const reversedMessages = [...directorMessages].reverse();
     for (const m of reversedMessages) {
       if (m.parts) {
         for (const part of m.parts) {
@@ -70,194 +173,93 @@ export default function DirectorConsole() {
             if (result?.success && result.url !== latestVideo) {
               setLatestVideo(result.url);
               setCurrentSpec(result.spec);
-              setVideoKey(prev => prev + 1);
+              setVideoKey(p => p + 1);
+              addLog('SYSTEM', 'New render detected. Updating preview.', 'success');
               break;
             }
           }
         }
       }
     }
-  }, [messages, latestVideo]);
+  }, [directorMessages, latestVideo]);
 
-  const onSubmit = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!inputValue.trim() || isLoading) return;
-    const userMessage = inputValue.trim();
-    setInputValue('');
-    try {
-      await sendMessage({ text: userMessage });
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      setInputValue(userMessage);
+  // --- UTILS & HANDLERS ---
+  const getExpertRole = (action: string) => {
+    if (action.includes('Voice')) return 'AUDIO ENGINEER';
+    if (action.includes('Image')) return 'VISUAL RESEARCHER';
+    if (action.includes('render')) return 'EDITOR';
+    return 'ASSISTANT';
+  };
+
+  const handleRoomMessage = async (text: string) => {
+    addLog('USER', text, 'info');
+    if (activeExpert) {
+        // Route to Expert Agent
+        await expertAppend({ role: 'user', content: text });
     }
   };
 
-  const handleManualRender = async () => {
-    if (!currentSpec || isLoading) return;
-    try {
-      await sendMessage({ 
-        text: `Re-render the video using this updated specification: ${JSON.stringify(currentSpec)}` 
-      });
-    } catch (error) {
-      console.error('Failed to re-render:', error);
+  const handleDirectorMessage = async (text: string) => {
+    // Director chat is only for Phase 1 (Planning)
+    if (!manifest) {
+        await directorAppend({ role: 'user', content: text });
     }
+  };
+
+  const clearHistory = () => {
+    fetch('/api/chat/history', { method: 'DELETE' });
+    setDirectorMessages([]);
+    setRoomLogs([]);
+    setManifest(null);
+    setLatestVideo(null);
+    setCurrentSpec(null);
   };
 
   return (
     <div className="flex h-screen bg-black text-zinc-200 font-sans overflow-hidden">
       
-      {/* --- PANE 1: LEFT (Sidebar) --- */}
-      <div className="w-[20%] min-w-[250px] flex flex-col border-r border-zinc-800 bg-zinc-950">
-        <div className="flex border-b border-zinc-800">
-          <button 
-            onClick={() => setActiveTab('chat')}
-            className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-2 ${activeTab === 'chat' ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:text-zinc-400'}`}
-          >
-            <Terminal className="w-4 h-4" /> CONSOLE
-          </button>
-          <button 
-            onClick={() => setActiveTab('files')}
-            className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-2 ${activeTab === 'files' ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:text-zinc-400'}`}
-          >
-            <FolderOpen className="w-4 h-4" /> ASSETS
-          </button>
-        </div>
+      {/* COL 1: DIRECTOR / PRODUCER */}
+      <ProducerPanel 
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        manifest={manifest}
+        isProducerBusy={isProducerBusy}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        clearHistory={clearHistory}
+        messages={directorMessages}
+        retryStep={(i) => { /* retry logic */ }}
+        sendMessage={handleDirectorMessage}
+      />
 
-        <div className="flex-1 overflow-hidden relative">
-          {activeTab === 'chat' ? (
-            <div className="absolute inset-0 flex flex-col">
-              {/* Chat Toolbar */}
-              <div className="flex justify-between items-center p-2 border-b border-zinc-800 bg-zinc-900/50">
-                <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-2">
-                  STATUS: <span className={isLoading ? "text-yellow-500 animate-pulse" : "text-green-500"}>{isLoading ? 'THINKING' : 'IDLE'}</span>
-                </div>
-                <div className="flex gap-1">
-                  <button 
-                    onClick={toggleViewMode} 
-                    title={viewMode === 'full' ? "Hide Thinking" : "Show All Details"}
-                    className={`p-1.5 rounded hover:bg-zinc-800 ${viewMode === 'clean' ? 'text-blue-400' : 'text-zinc-600'}`}
-                  >
-                    {viewMode === 'full' ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                  </button>
-                  <button onClick={clearHistory} className="p-1.5 rounded hover:bg-red-900/30 text-zinc-600 hover:text-red-500">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Chat Stream */}
-              <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-thin">
-                {messages.map((m) => (
-                  <div key={m.id} className={`text-xs group ${m.role === 'user' ? 'text-blue-300' : 'text-zinc-400'}`}>
-                    <span className="font-bold opacity-50 uppercase mb-1 block text-[10px] tracking-wider">{m.role}</span>
-                    
-                    <div className="whitespace-pre-wrap leading-relaxed">
-                      {m.parts.map((part, idx) => {
-                        // RENDER TEXT
-                        if (part.type === 'text') {
-                          return <div key={idx}>{part.text}</div>;
-                        } 
-                        
-                        // RENDER TOOL CALLS (Only if in FULL mode or if actively streaming)
-                        else if (part.type === 'tool-call') {
-                          if (viewMode === 'clean' && status === 'ready') return null;
-                          return (
-                            <div key={idx} className="mt-2 mb-2 p-2 bg-zinc-900 rounded border border-zinc-800 font-mono text-[10px] text-yellow-600/80 flex items-center gap-2">
-                              <div className="w-1.5 h-1.5 rounded-full bg-yellow-600 animate-pulse"></div>
-                              Executing: {(part as any).toolName}
-                            </div>
-                          );
-                        } 
-                        
-                        // RENDER TOOL RESULTS
-                        else if (part.type === 'tool-result') {
-                          const toolName = (part as any).toolName;
-                          const isRender = toolName === 'renderVideo';
-                          
-                          if (viewMode === 'clean' && !isRender) return null;
-
-                          return (
-                            <div key={idx} className={`mt-1 text-[10px] font-mono flex items-center gap-2 ${isRender ? 'text-green-400 p-2 bg-green-900/20 border border-green-900/50 rounded' : 'text-zinc-600'}`}>
-                              {isRender ? '✅ RENDER COMPLETE' : `✓ ${toolName}`}
-                            </div>
-                          );
-                        }
-                        return null;
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              
-              <form onSubmit={onSubmit} className="p-2 border-t border-zinc-800 bg-zinc-950">
-                <textarea
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs focus:border-zinc-600 focus:bg-zinc-800 outline-none resize-none text-zinc-200 placeholder-zinc-600"
-                  rows={3}
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="Command the Director..."
-                  disabled={isLoading}
-                  onKeyDown={(e) => {
-                    if(e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      onSubmit();
-                    }
-                  }}
-                />
-              </form>
-            </div>
-          ) : (
-            <FileExplorer />
-          )}
-        </div>
-      </div>
-
-      {/* --- PANE 2: MIDDLE (Editor) --- */}
-      <div className="flex-1 flex flex-col bg-zinc-900/50 border-r border-zinc-800">
-        <SpecEditor 
-          spec={currentSpec} 
-          onUpdate={setCurrentSpec} 
-          onRender={handleManualRender}
-        />
-      </div>
-
-      {/* --- PANE 3: RIGHT (Preview) --- */}
-      <div className="w-[30%] min-w-[400px] bg-black flex flex-col relative">
-        <div className="absolute top-4 left-4 z-10 flex items-center gap-3">
-          <div className="bg-zinc-950/80 backdrop-blur border border-zinc-800 px-3 py-1.5 rounded-full flex items-center gap-2 shadow-lg">
-            <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-ping' : 'bg-green-500'}`}></div>
-            <span className="text-[10px] font-mono font-bold text-zinc-300 tracking-widest">
-              {isLoading ? 'PROCESSING' : 'LIVE FEED'}
-            </span>
-          </div>
-        </div>
+      {/* COL 2 & 3 CONTAINER */}
+      <div className="flex-1 flex flex-col min-w-0 relative">
         
-        <div className="flex-1 flex items-center justify-center p-8 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-zinc-900 to-black">
-          {latestVideo ? (
-            <div className="relative w-full h-full flex items-center justify-center group">
-              {/* Video Container */}
-              <div className="relative max-h-full max-w-full aspect-[9/16] shadow-2xl border border-zinc-800 rounded-lg overflow-hidden bg-black">
-                <video 
-                  key={videoKey} 
-                  src={latestVideo} 
-                  controls 
-                  autoPlay 
-                  loop 
-                  className="w-full h-full object-contain"
+        {/* TOP: EDITOR & PREVIEW */}
+        <div className="flex-1 flex min-h-0">
+            <div className="flex-1 flex flex-col bg-zinc-900/50 border-r border-zinc-800 min-w-0">
+                <SpecEditor 
+                  spec={currentSpec} 
+                  onUpdate={setCurrentSpec} 
+                  onRender={() => {}}
                 />
-              </div>
             </div>
-          ) : (
-            <div className="text-zinc-800 flex flex-col items-center gap-4">
-              <div className="w-24 h-24 rounded-full border-2 border-dashed border-zinc-800 flex items-center justify-center">
-                <Play className="w-10 h-10 opacity-20" />
-              </div>
-              <p className="font-mono text-xs tracking-widest opacity-50">AWAITING SIGNAL</p>
-            </div>
-          )}
+            <PreviewPanel 
+                latestVideo={latestVideo}
+                videoKey={videoKey}
+                isProducerBusy={isProducerBusy}
+            />
         </div>
-      </div>
 
+        {/* BOTTOM: THE ROOM (CONSOLE) */}
+        <TheRoom 
+            logs={roomLogs}
+            activeExpert={activeExpert}
+            onSendMessage={handleRoomMessage}
+            isTyping={isExpertLoading}
+        />
+
+      </div>
     </div>
   );
 }
