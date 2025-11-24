@@ -78,19 +78,24 @@ export const generateVoiceover = tool({
     try {
       const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
       // Using Gemini 2.0 Flash Exp for TTS
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: script }] }],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName } }
-            }
-          }
-        })
-      });
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    contents: [{ parts: [{ text: script }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: { 
+          prebuiltVoiceConfig: { 
+            // The 2.5 TTS model supports these voices: 'Kore', 'Fenrir', 'Puck', 'Zephyr', 'Aoede'
+            voiceName: voiceName 
+          } 
+        }
+      }
+    }
+  })
+});
 
       if (!response.ok) throw new Error(`TTS API Error: ${response.statusText}`);
       

@@ -1,6 +1,6 @@
 'use client';
 
-import { useChat } from 'ai/react';
+import { useChat } from '@ai-sdk/react'; // ✅ Correct import for SDK 5.x
 import { useState, useEffect } from 'react';
 import { Terminal, FolderOpen, Play, Trash2 } from 'lucide-react';
 import FileExplorer from '../components/FileExplorer';
@@ -12,11 +12,34 @@ export default function DirectorConsole() {
   const [latestVideo, setLatestVideo] = useState<string | null>(null);
   const [videoKey, setVideoKey] = useState(0);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, append, setMessages } = useChat({
-    maxSteps: 10,
+  // 1. Manually manage the input state
+  const [inputValue, setInputValue] = useState('');
+
+  // 2. Destructure only what exists in SDK 5.0 (removed input/handleSubmit)
+  const { messages, isLoading, append, setMessages } = useChat({
+    maxSteps: 20, // Match your API route config
     api: '/api/chat',
+    onError: (e) => console.error("Chat Error:", e), // Handy for debugging
   });
 
+  // 3. Create a custom submit handler
+  const onSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!inputValue.trim()) return;
+
+    // Save the input content before clearing
+    const userMessage = inputValue;
+    setInputValue(''); // Clear UI immediately
+
+    // Send to the agent
+    await append({
+      role: 'user',
+      content: userMessage,
+    });
+  };
+
+  // ... (Keep your existing useEffects for History and Sync) ...
+  // [Re-paste your existing useEffects here if you aren't replacing the whole file]
   // 1. Load History on Mount
   useEffect(() => {
     fetch('/api/chat/history')
@@ -35,25 +58,22 @@ export default function DirectorConsole() {
     setCurrentSpec(null);
   };
 
-  // 3. Smart State Sync
   useEffect(() => {
     const reversedMessages = [...messages].reverse();
-    let foundVideo = false;
     for (const m of reversedMessages) {
+      // Note: Check 'content' array in SDK 5 if toolInvocations is missing on client,
+      // but usually toolInvocations is preserved on the client-side message object.
       if (m.toolInvocations) {
         const renderResult = m.toolInvocations.find(
           (inv) => inv.toolName === 'renderVideo' && inv.state === 'result'
         );
         if (renderResult && 'result' in renderResult) {
           const result = renderResult.result as any;
-          if (result.success) {
-            if (latestVideo !== result.url) {
-              setLatestVideo(result.url);
-              setCurrentSpec(result.spec);
-              setVideoKey(prev => prev + 1);
-            }
-            foundVideo = true;
-            break;
+          if (result.success && result.url !== latestVideo) {
+            setLatestVideo(result.url);
+            setCurrentSpec(result.spec);
+            setVideoKey(prev => prev + 1);
+            break; // Stop after finding the latest
           }
         }
       }
@@ -71,8 +91,9 @@ export default function DirectorConsole() {
   return (
     <div className="flex h-screen bg-black text-zinc-200 font-sans overflow-hidden">
       
-      {/* --- PANE 1: LEFT (Sidebar - 14%) --- */}
+      {/* --- PANE 1: LEFT (Sidebar) --- */}
       <div className="w-[14%] min-w-[200px] flex flex-col border-r border-zinc-800 bg-zinc-950">
+        {/* ... (Keep your existing Tab Buttons) ... */}
         <div className="flex border-b border-zinc-800">
           <button 
             onClick={() => setActiveTab('chat')}
@@ -102,14 +123,10 @@ export default function DirectorConsole() {
                   <div key={m.id} className={`text-xs ${m.role === 'user' ? 'text-blue-300' : 'text-zinc-400'}`}>
                     <span className="font-bold opacity-50 uppercase mb-1 block">{m.role}</span>
                     <div className="whitespace-pre-wrap">
-                      {/* FIX: Handle Complex Object Content vs Simple Strings */}
-                      {typeof m.content === 'string' ? m.content : (
-                        Array.isArray(m.content) ? m.content.map((part: any, i: number) => {
-                          if (part.type === 'text') return <span key={i}>{part.text}</span>;
-                          return null;
-                        }) : null
-                      )}
+                      {/* Render Text Content */}
+                      {m.content}
                     </div>
+                    {/* Render Tools */}
                     {m.toolInvocations?.map(t => (
                       <div key={t.toolCallId} className="mt-1 text-[10px] text-zinc-600 font-mono">
                         ⚙️ {t.toolName} ({t.state})
@@ -119,17 +136,19 @@ export default function DirectorConsole() {
                 ))}
                 {isLoading && <div className="text-zinc-600 animate-pulse text-xs">Director is thinking...</div>}
               </div>
-              <form onSubmit={handleSubmit} className="p-2 border-t border-zinc-800">
+              
+              {/* 4. Updated Form with new Handlers */}
+              <form onSubmit={onSubmit} className="p-2 border-t border-zinc-800">
                 <textarea
                   className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs focus:border-red-900 outline-none resize-none"
                   rows={3}
-                  value={input}
-                  onChange={handleInputChange}
+                  value={inputValue} // Bound to local state
+                  onChange={(e) => setInputValue(e.target.value)} // Update local state
                   placeholder="Instruct..."
                   onKeyDown={(e) => {
                     if(e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      handleSubmit(e as any);
+                      onSubmit(); // Call custom submit
                     }
                   }}
                 />
@@ -141,7 +160,7 @@ export default function DirectorConsole() {
         </div>
       </div>
 
-      {/* --- PANE 2: MIDDLE (Editor - Flex) --- */}
+      {/* --- PANE 2: MIDDLE (Editor) --- */}
       <div className="flex-1 flex flex-col bg-zinc-900/50 border-r border-zinc-800">
         <SpecEditor 
           spec={currentSpec} 
@@ -150,7 +169,7 @@ export default function DirectorConsole() {
         />
       </div>
 
-      {/* --- PANE 3: RIGHT (Preview - 30%) --- */}
+      {/* --- PANE 3: RIGHT (Preview) --- */}
       <div className="w-[30%] min-w-[400px] bg-black flex flex-col relative">
         <div className="absolute top-4 left-4 text-zinc-600 font-mono text-xs flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-ping' : 'bg-red-600'}`}></div>
