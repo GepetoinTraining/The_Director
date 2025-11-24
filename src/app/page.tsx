@@ -1,6 +1,6 @@
 'use client';
 
-import { useChat } from '@ai-sdk/react'; // ✅ Correct import for SDK 5.x
+import { useChat } from '@ai-sdk/react';
 import { useState, useEffect } from 'react';
 import { Terminal, FolderOpen, Play, Trash2 } from 'lucide-react';
 import FileExplorer from '../components/FileExplorer';
@@ -12,35 +12,17 @@ export default function DirectorConsole() {
   const [latestVideo, setLatestVideo] = useState<string | null>(null);
   const [videoKey, setVideoKey] = useState(0);
 
-  // 1. Manually manage the input state
+  // 1. Manually manage the input state (Required for SDK 5)
   const [inputValue, setInputValue] = useState('');
 
-  // 2. Destructure only what exists in SDK 5.0 (removed input/handleSubmit)
-  const { messages, isLoading, append, setMessages } = useChat({
-    maxSteps: 20, // Match your API route config
+  // 2. Destructure 'sendMessage' instead of 'append'
+  const { messages, isLoading, sendMessage, setMessages } = useChat({
+    maxSteps: 20,
     api: '/api/chat',
-    onError: (e) => console.error("Chat Error:", e), // Handy for debugging
+    onError: (e) => console.error("Chat Error:", e),
   });
 
-  // 3. Create a custom submit handler
-  const onSubmit = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!inputValue.trim()) return;
-
-    // Save the input content before clearing
-    const userMessage = inputValue;
-    setInputValue(''); // Clear UI immediately
-
-    // Send to the agent
-    await append({
-      role: 'user',
-      content: userMessage,
-    });
-  };
-
-  // ... (Keep your existing useEffects for History and Sync) ...
-  // [Re-paste your existing useEffects here if you aren't replacing the whole file]
-  // 1. Load History on Mount
+  // 3. Load History on Mount
   useEffect(() => {
     fetch('/api/chat/history')
       .then(res => res.json())
@@ -58,11 +40,10 @@ export default function DirectorConsole() {
     setCurrentSpec(null);
   };
 
+  // 4. Smart State Sync (Detecting the Render Tool Result)
   useEffect(() => {
     const reversedMessages = [...messages].reverse();
     for (const m of reversedMessages) {
-      // Note: Check 'content' array in SDK 5 if toolInvocations is missing on client,
-      // but usually toolInvocations is preserved on the client-side message object.
       if (m.toolInvocations) {
         const renderResult = m.toolInvocations.find(
           (inv) => inv.toolName === 'renderVideo' && inv.state === 'result'
@@ -73,27 +54,37 @@ export default function DirectorConsole() {
             setLatestVideo(result.url);
             setCurrentSpec(result.spec);
             setVideoKey(prev => prev + 1);
-            break; // Stop after finding the latest
+            break;
           }
         }
       }
     }
   }, [messages, latestVideo]);
 
+  // 5. Custom Submit Handler
+  const onSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!inputValue.trim()) return;
+
+    const userMessage = inputValue;
+    setInputValue(''); // Clear UI immediately
+
+    // SDK v5: Use sendMessage with the string directly
+    await sendMessage(userMessage);
+  };
+
+  // 6. Manual Render Handler
   const handleManualRender = async () => {
     if (!currentSpec) return;
-    append({
-      role: 'user',
-      content: `Re-render the video using this updated specification: ${JSON.stringify(currentSpec)}`
-    });
+    
+    await sendMessage(`Re-render the video using this updated specification: ${JSON.stringify(currentSpec)}`);
   };
 
   return (
     <div className="flex h-screen bg-black text-zinc-200 font-sans overflow-hidden">
       
-      {/* --- PANE 1: LEFT (Sidebar) --- */}
+      {/* --- PANE 1: LEFT (Sidebar - 14%) --- */}
       <div className="w-[14%] min-w-[200px] flex flex-col border-r border-zinc-800 bg-zinc-950">
-        {/* ... (Keep your existing Tab Buttons) ... */}
         <div className="flex border-b border-zinc-800">
           <button 
             onClick={() => setActiveTab('chat')}
@@ -137,18 +128,17 @@ export default function DirectorConsole() {
                 {isLoading && <div className="text-zinc-600 animate-pulse text-xs">Director is thinking...</div>}
               </div>
               
-              {/* 4. Updated Form with new Handlers */}
               <form onSubmit={onSubmit} className="p-2 border-t border-zinc-800">
                 <textarea
                   className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs focus:border-red-900 outline-none resize-none"
                   rows={3}
-                  value={inputValue} // Bound to local state
-                  onChange={(e) => setInputValue(e.target.value)} // Update local state
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Instruct..."
                   onKeyDown={(e) => {
                     if(e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      onSubmit(); // Call custom submit
+                      onSubmit();
                     }
                   }}
                 />
@@ -160,7 +150,7 @@ export default function DirectorConsole() {
         </div>
       </div>
 
-      {/* --- PANE 2: MIDDLE (Editor) --- */}
+      {/* --- PANE 2: MIDDLE (Editor - Flex) --- */}
       <div className="flex-1 flex flex-col bg-zinc-900/50 border-r border-zinc-800">
         <SpecEditor 
           spec={currentSpec} 
@@ -169,7 +159,7 @@ export default function DirectorConsole() {
         />
       </div>
 
-      {/* --- PANE 3: RIGHT (Preview) --- */}
+      {/* --- PANE 3: RIGHT (Preview - 30%) --- */}
       <div className="w-[30%] min-w-[400px] bg-black flex flex-col relative">
         <div className="absolute top-4 left-4 text-zinc-600 font-mono text-xs flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-ping' : 'bg-red-600'}`}></div>
