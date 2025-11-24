@@ -1,28 +1,69 @@
-import fs from 'fs';
-import path from 'path';
+import { db } from '../db';
+import { projects, events } from '../db/schema';
+import { eq, asc, desc } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
 
-const DB_PATH = path.join(process.cwd(), 'data');
-const CHAT_FILE = path.join(DB_PATH, 'chat_history.json');
+// --- PROJECT MANAGEMENT ---
 
-// Ensure DB exists
-if (!fs.existsSync(DB_PATH)) {
-  fs.mkdirSync(DB_PATH, { recursive: true });
+export async function getOrCreateProject(id: string = 'default') {
+  const existing = db.select().from(projects).where(eq(projects.id, id)).get();
+  if (existing) return existing;
+
+  const newProject = { id, name: 'New Session', status: 'development' };
+  db.insert(projects).values(newProject).run();
+  return newProject;
 }
 
-export function getChatHistory() {
-  if (!fs.existsSync(CHAT_FILE)) return [];
-  try {
-    const data = fs.readFileSync(CHAT_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (e) {
-    return [];
-  }
+export async function updateProjectStatus(id: string, status: string, manifest?: any) {
+  db.update(projects)
+    .set({ 
+      status, 
+      currentManifest: manifest ? JSON.stringify(manifest) : undefined 
+    })
+    .where(eq(projects.id, id))
+    .run();
 }
 
-export function saveChatHistory(messages: any[]) {
-  fs.writeFileSync(CHAT_FILE, JSON.stringify(messages, null, 2));
+// --- EVENT LOGGING (The Heartbeat) ---
+
+export async function logEvent(projectId: string, event: {
+  source: 'USER' | 'DIRECTOR' | 'PRODUCER' | 'EXPERT' | 'SYSTEM',
+  type: 'chat' | 'log' | 'error' | 'command',
+  content: string,
+  metadata?: any
+}) {
+  db.insert(events).values({
+    projectId,
+    source: event.source,
+    type: event.type,
+    content: event.content,
+    metadata: event.metadata ? JSON.stringify(event.metadata) : null
+  }).run();
 }
 
-export function clearChatHistory() {
-  if (fs.existsSync(CHAT_FILE)) fs.unlinkSync(CHAT_FILE);
+// --- RETRIEVAL (For Context) ---
+
+export async function getProjectHistory(projectId: string) {
+  const rows = db.select()
+    .from(events)
+    .where(eq(events.projectId, projectId))
+    .orderBy(asc(events.createdAt))
+    .all();
+
+  // Map back to UI/AI format
+  return rows.map(row => ({
+    id: row.id.toString(),
+    role: mapSourceToRole(row.source), // Helper needed
+    content: row.content,
+    source: row.source, // Keep original source for UI
+    type: row.type,
+    metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    createdAt: row.createdAt
+  }));
+}
+
+function mapSourceToRole(source: string) {
+  if (source === 'USER') return 'user';
+  if (source === 'DIRECTOR' || source === 'EXPERT') return 'assistant';
+  return 'system';
 }
