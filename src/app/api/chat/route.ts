@@ -1,83 +1,98 @@
-// src/app/api/chat/route.ts
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { streamText, convertToCoreMessages } from 'ai';
-import { logEvent, getOrCreateProject } from '../../../lib/storage';
+import { getOrCreateProject, logEvent } from '../../../lib/storage';
 import { DIRECTOR_SYSTEM_PROMPT, DIRECTOR_TOOLS } from '../../../lib/director';
+import { EXPERT_PROMPTS } from '../../../lib/expert';
+import { projects } from '../../../db/schema';
+import { eq } from 'drizzle-orm';
+import { db } from '../../../db';
 
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  let body;
-  try {
-    const text = await req.text();
-    if (!text) return new Response('Missing request body', { status: 400 });
-    body = JSON.parse(text);
-  } catch (error) {
-    console.error("❌ JSON Parse Error:", error);
-    return new Response('Invalid JSON body', { status: 400 });
-  }
-
-  const { messages } = body;
-  const coreMessages = convertToCoreMessages(messages);
-
-  // 1. Ensure Project Exists & Log User Message
+  // 1. Setup & Parsing
+  const { messages } = await req.json();
   const projectId = 'default';
   await getOrCreateProject(projectId);
 
-  // We only log the *latest* user message to avoid duplicates, 
-  // as 'messages' contains the full history.
   const lastMessage = messages[messages.length - 1];
-  if (lastMessage && lastMessage.role === 'user') {
+  const userContent = lastMessage.content as string;
+
+  // Log User Input (skip internal commands)
+  if (lastMessage.role === 'user' && !userContent.startsWith('[PRODUCER_MODE]')) {
     await logEvent(projectId, {
       source: 'USER',
       type: 'chat',
-      content: lastMessage.content
+      content: userContent
     });
   }
 
+  // 2. Determine State
+  const project = await db.select().from(projects).where(eq(projects.id, projectId)).get();
+  const currentManifest = project?.currentManifest ? JSON.parse(project.currentManifest) : null;
+  const isProductionMode = !!currentManifest;
+
+  // 3. ROUTING LOGIC (The Switchboard)
+  let activeAgent = 'DIRECTOR';
+  let systemPrompt = DIRECTOR_SYSTEM_PROMPT;
+  let tools: any = DIRECTOR_TOOLS;
+
+  // A. Explicit Routing via Tags
+  if (userContent.includes('@audio')) {
+    activeAgent = 'AUDIO_ENGINEER';
+    systemPrompt = EXPERT_PROMPTS.AUDIO;
+    tools = undefined; // Experts don't edit, they advise
+  } 
+  else if (userContent.includes('@visual')) {
+    activeAgent = 'VISUAL_RESEARCHER';
+    systemPrompt = EXPERT_PROMPTS.VISUAL;
+    tools = undefined;
+  }
+  else if (userContent.includes('@expert')) {
+    activeAgent = 'EXPERT';
+    systemPrompt = EXPERT_PROMPTS.GENERAL;
+    tools = undefined;
+  }
+  else if (userContent.includes('@director')) {
+    activeAgent = 'DIRECTOR';
+    // Director keeps defaults
+  }
+  // B. Implicit Routing via Phase
+  else if (isProductionMode && !userContent.includes('[PRODUCER_MODE]')) {
+    // If we are in production but not running a tool command, default to General Expert
+    activeAgent = 'EXPERT';
+    systemPrompt = EXPERT_PROMPTS.GENERAL;
+    tools = undefined;
+  }
+  // C. Default: DIRECTOR (Planning Phase)
+
+  // 4. Connect to Model
   const google = createGoogleGenerativeAI({
     apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
   });
 
   const result = await streamText({
     model: google('gemini-2.5-flash'),
-    messages: coreMessages,
-    system: DIRECTOR_SYSTEM_PROMPT,
-    tools: DIRECTOR_TOOLS,
+    messages: convertToCoreMessages(messages),
+    system: systemPrompt,
+    tools: tools,
     maxSteps: 10,
     onFinish: async ({ response }) => {
-      // 2. Log Director's Response (Text + Tool Calls)
-      // response.messages contains the newly generated turns (assistant text or tool calls)
-      for (const msg of response.messages) {
-        // Determine content based on message type
-        let content = '';
-        let metadata = null;
+      // 5. Log Response
+      const responseText = response.messages.map(m => 
+        m.content.map(c => c.type === 'text' ? c.text : '').join('')
+      ).join('\n');
 
-        if (msg.content && typeof msg.content === 'string') {
-            content = msg.content;
-        } else if (Array.isArray(msg.content)) {
-            // Handle multi-part content (text + tool calls)
-            content = msg.content
-                .filter(c => c.type === 'text')
-                .map(c => c.text)
-                .join('\n');
-            
-            // We can store tool calls in metadata or logging specific tool events
-            const toolCalls = msg.content.filter(c => c.type === 'tool-call');
-            if (toolCalls.length > 0) {
-                metadata = { toolCalls };
-                // Optionally append tool usage notice to content if empty
-                if (!content) content = `[Executing: ${toolCalls.map(t => t.toolName).join(', ')}]`;
-            }
-        }
+      const toolCalls = response.messages
+        .flatMap(m => m.content)
+        .filter(c => c.type === 'tool-call');
 
-        await logEvent(projectId, {
-          source: 'DIRECTOR',
-          type: 'chat',
-          content: content || '[Tool Execution]', // Fallback if purely tool call
-          metadata: metadata
-        });
-      }
+      await logEvent(projectId, {
+        source: activeAgent as any, // Types: DIRECTOR | EXPERT | etc.
+        type: 'chat',
+        content: responseText || (toolCalls.length ? '[Tool Executing...]' : ''),
+        metadata: toolCalls.length > 0 ? { toolCalls } : null
+      });
     }
   } as any);
 

@@ -2,7 +2,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { streamText, convertToCoreMessages } from 'ai';
 import { getOrCreateProject, logEvent } from '../../../lib/storage';
 import { DIRECTOR_SYSTEM_PROMPT, DIRECTOR_TOOLS } from '../../../lib/director';
-import { EXPERT_SYSTEM_PROMPT } from '../../../lib/expert';
+import { EXPERT_PROMPTS } from '../../../lib/expert';
 import { projects } from '../../../db/schema';
 import { eq } from 'drizzle-orm';
 import { db } from '../../../db';
@@ -10,56 +10,67 @@ import { db } from '../../../db';
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  // 1. Parse & Log
+  // 1. Setup & Parsing
   const { messages } = await req.json();
   const projectId = 'default';
   await getOrCreateProject(projectId);
 
   const lastMessage = messages[messages.length - 1];
-  
-  // Only log if it's a real user message (not an internal re-prompt)
-  if (lastMessage.role === 'user' && !lastMessage.content.startsWith('[PRODUCER_MODE]')) {
+  const userContent = lastMessage.content as string;
+
+  // Log User Input
+  if (lastMessage.role === 'user' && !userContent.startsWith('[PRODUCER_MODE]')) {
     await logEvent(projectId, {
       source: 'USER',
       type: 'chat',
-      content: lastMessage.content
+      content: userContent
     });
   }
 
-  // 2. Routing Logic
+  // 2. Determine State
   const project = await db.select().from(projects).where(eq(projects.id, projectId)).get();
   const currentManifest = project?.currentManifest ? JSON.parse(project.currentManifest) : null;
-  
+  const isProductionMode = !!currentManifest;
+
+  // 3. ROUTING LOGIC
   let activeAgent = 'DIRECTOR';
   let systemPrompt = DIRECTOR_SYSTEM_PROMPT;
   let tools: any = DIRECTOR_TOOLS;
 
   // Priority: Tags > Phase > Default
-  if (lastMessage.content.includes('@expert')) {
+  if (userContent.includes('@audio')) {
+    activeAgent = 'AUDIO_ENGINEER';
+    systemPrompt = EXPERT_PROMPTS.AUDIO;
+    tools = undefined; // Experts advise, they don't use tools
+  } else if (userContent.includes('@visual')) {
+    activeAgent = 'VISUAL_RESEARCHER';
+    systemPrompt = EXPERT_PROMPTS.VISUAL;
+    tools = undefined;
+  } else if (userContent.includes('@expert')) {
     activeAgent = 'EXPERT';
-    systemPrompt = EXPERT_SYSTEM_PROMPT;
-    tools = undefined; 
-  } else if (lastMessage.content.includes('@director')) {
+    systemPrompt = EXPERT_PROMPTS.GENERAL;
+    tools = undefined;
+  } else if (userContent.includes('@director')) {
     activeAgent = 'DIRECTOR';
-  } else if (currentManifest && !lastMessage.content.includes('[PRODUCER_MODE]')) {
-    // Production Phase default
+  } else if (isProductionMode && !userContent.includes('[PRODUCER_MODE]')) {
     activeAgent = 'EXPERT';
-    systemPrompt = EXPERT_SYSTEM_PROMPT;
+    systemPrompt = EXPERT_PROMPTS.GENERAL;
     tools = undefined;
   }
 
-  // 3. Execute
+  // 4. Execute with Google Gemini 2.5
   const google = createGoogleGenerativeAI({
     apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
   });
 
   const result = await streamText({
     model: google('gemini-2.5-flash'),
-    messages: convertToCoreMessages(messages),
+    messages: convertToCoreMessages(messages), // v5 Sanitization [cite: 173]
     system: systemPrompt,
     tools: tools,
-    maxSteps: 10,
+    maxSteps: 10, // Critical: Must match client or be sufficient for tool loops [cite: 278]
     onFinish: async ({ response }) => {
+      // Log the final response to your DB
       const responseText = response.messages.map(m => 
         m.content.map(c => c.type === 'text' ? c.text : '').join('')
       ).join('\n');
@@ -75,8 +86,10 @@ export async function POST(req: Request) {
         metadata: toolCalls.length > 0 ? { toolCalls } : null
       });
     }
-  } as any);
+  });
 
-  // @ts-ignore
+  // 5. RETURN THE CORRECT V5 STREAM
+  // This resolves the "Property does not exist" error by using the method
+  // specifically designed to hydrate the client-side useChat hook.
   return result.toUIMessageStreamResponse();
 }
