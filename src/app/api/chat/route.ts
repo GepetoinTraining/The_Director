@@ -1,80 +1,54 @@
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { streamText } from 'ai';
-import { batchDownloadClips, renderVideo, generateVoiceover, downloadImage } from '../../../tools/videoTools';
+import { streamText, convertToCoreMessages } from 'ai';
 import { saveChatHistory } from '../../../lib/storage';
+import { DIRECTOR_SYSTEM_PROMPT, DIRECTOR_TOOLS } from '../../../lib/director';
 
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  console.log('📥 Received request body:', JSON.stringify(body, null, 2));
-  
+  // 1. DEFENSIVE PARSING
+  let body;
+  try {
+    const text = await req.text();
+    if (!text) return new Response('Missing request body', { status: 400 });
+    body = JSON.parse(text);
+  } catch (error) {
+    console.error("❌ JSON Parse Error:", error);
+    return new Response('Invalid JSON body', { status: 400 });
+  }
+
   const { messages } = body;
-  const google = createGoogleGenerativeAI();
+  
+  // 2. DATA SANITIZATION (THE FIX)
+  // The frontend sends UIMessages (complex). Gemini needs CoreMessages (simple).
+  // We must convert them before sending to the model.
+  const coreMessages = convertToCoreMessages(messages);
 
+  const google = createGoogleGenerativeAI({
+    apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  });
+
+  // 3. EXECUTION (THE BRAIN)
   const result = await streamText({
-    model: google('gemini-2.5-flash'),
-    messages,
-    system: `You are "The Director", an autonomous video production agent.
-    
-    YOUR OPERATING MODE: "Plan, Then Execute".
-    
-    PHASE 1: PLANNING (Text Only)
-    - When the user asks for a video, DO NOT call tools immediately.
-    - Draft a detailed plan in Markdown (Shot List, Audio Script, Narrative).
-    - Ask the user for approval (in the user's language).
-
-    PHASE 2: EXECUTION (Tools ONLY)
-    - Trigger Condition: If the user says "yes", "do it", "go", "sim", "pode", "faça", or agrees.
-    - Action: Execute the following tools in this STRICT order (do not reply with text like "Okay"):
-      
-      1. **Voiceover:** Call 'generateVoiceover' first to create the audio backbone (.wav).
-      2. **Images:** Call 'downloadImage' for any static assets in the plan.
-      3. **Video:** Call 'batchDownloadClips' to get the footage.
-      4. **Render:** Call 'renderVideo' to assemble the final edit. Use 'audioTracks' for the voiceover.
-
-    EDITLY SPECIFICATION RULES:
-    - Resolution: 1080x1920 (Vertical) unless specified otherwise.
-    - Audio: You MUST include the generated voiceover in the 'audioTracks' array of the spec.
-    - Layers: Mix 'video' and 'image' layers as planned.
-    `,
-    tools: {
-      batchDownloadClips,
-      renderVideo,
-      generateVoiceover,
-      downloadImage
-    },
-    maxSteps: 20,
-    onFinish: async ({ response, usage }) => {
-      console.log("\n=== 🎬 DIRECTOR LOG: TURN COMPLETE ===");
-      console.log("📊 Token Usage:", usage);
-
-      const newMessages = response.messages;
-
-      for (const m of newMessages) {
-        if (m.role === 'assistant') {
-          console.log("🤖 ASSISTANT:");
-          
-          if (typeof m.content === 'string') {
-            console.log("   Text:", m.content);
-          } else if (Array.isArray(m.content)) {
-            m.content.forEach((part: any) => {
-              if (part.type === 'text') {
-                console.log("   📝 Text:", part.text);
-              } else if (part.type === 'tool-call') {
-                console.log("   🛠️ TOOL CALL:", part.toolName);
-                console.log("      Args:", JSON.stringify(part.args, null, 2));
-              }
-            });
-          }
-        }
-      }
-      console.log("========================================\n");
-
+    model: google('gemini-2.0-flash-001'), 
+    messages: coreMessages, // <--- USE SANITIZED MESSAGES HERE
+    system: DIRECTOR_SYSTEM_PROMPT,
+    tools: DIRECTOR_TOOLS,
+    maxSteps: 10, 
+    onFinish: async ({ response }) => {
+      // 4. PERSISTENCE (RAW DATA)
+      // We persist the *original* UI messages + the new response messages
+      // so the frontend can reload the full state (ids, tool invocations, etc.)
+      // Note: response.messages are already in a format compatible with storage/UI reconstruction
+      // but we need to be careful about mixing types. 
+      // Ideally, we let the frontend manage state via the stream, 
+      // but since we are saving to file, we append the new response messages.
       const newHistory = [...messages, ...response.messages];
       saveChatHistory(newHistory);
     }
-  });
+  } as any); 
 
-  return result.toDataStreamResponse();
+  // 5. STREAMING (THE PIPE)
+  // @ts-ignore
+  return result.toUIMessageStreamResponse();
 }

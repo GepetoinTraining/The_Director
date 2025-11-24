@@ -21,43 +21,45 @@ const addSecondsToTime = (timeStr: string, secondsToAdd: number) => {
   return `${newH}:${newM}:${newS}`;
 };
 
-export const batchDownloadClips = tool({
-  description: 'Downloads MULTIPLE video clips sequentially.',
+// FIX: Changed from 'batchDownloadClips' (Array) to 'searchAndCreateClip' (Single Object)
+// This satisfies Gemini's strict schema requirements and prevents timeouts.
+export const searchAndCreateClip = tool({
+  description: 'Searches YouTube and downloads a SINGLE specific video segment.',
   parameters: z.object({
-    targets: z.array(z.object({
-      query: z.string().describe('YouTube search query'),
-      startTime: z.string().describe('Start time (HH:MM:SS)'),
-      duration: z.number().describe('Duration in seconds'),
-      fileName: z.string().describe('Output filename (.mp4)'),
-    }))
+    query: z.string().describe('YouTube search query'),
+    startTime: z.string().describe('Start time (HH:MM:SS)'),
+    duration: z.number().describe('Duration in seconds'),
+    fileName: z.string().describe('Output filename (.mp4)'),
   }),
-  execute: async ({ targets }) => {
+  execute: async ({ query, startTime, duration, fileName }) => {
     const downloadsDir = path.join(process.cwd(), 'downloads');
     ensureDir(downloadsDir);
+    const outputPath = path.join(downloadsDir, fileName);
     
-    console.log(`🚀 Starting Batch Download of ${targets.length} clips...`);
-    const results = [];
+    console.log(`🚀 [Clip Hunter] Searching: "${query}"`);
 
-    for (const target of targets) {
-      const outputPath = path.join(downloadsDir, target.fileName);
-      try {
-        const searchCmd = `yt-dlp "ytsearch1:${target.query}" --print id`;
-        const { stdout: videoId } = await execAsync(searchCmd);
-        const cleanId = videoId.trim();
-        const url = `https://www.youtube.com/watch?v=${cleanId}`;
-        const endTime = addSecondsToTime(target.startTime, target.duration);
-        
-        console.log(`⬇️ [${target.fileName}] Downloading...`);
-        const command = `yt-dlp -f "bestvideo+bestaudio/best" --merge-output-format mp4 --download-sections "*${target.startTime}-${endTime}" --force-keyframes-at-cuts -o "${outputPath}" "${url}" --force-overwrites`;
-        await execAsync(command);
+    try {
+      // 1. Get ID
+      const searchCmd = `yt-dlp "ytsearch1:${query}" --print id`;
+      const { stdout: videoId } = await execAsync(searchCmd);
+      const cleanId = videoId.trim();
+      if (!cleanId) throw new Error("No video found for query");
 
-        results.push({ success: true, file: target.fileName, path: outputPath });
-      } catch (e: any) {
-        console.error(`❌ Failed ${target.fileName}:`, e.message);
-        results.push({ success: false, file: target.fileName, error: e.message });
-      }
+      const url = `https://www.youtube.com/watch?v=${cleanId}`;
+      const endTime = addSecondsToTime(startTime, duration);
+      
+      console.log(`⬇️ [${fileName}] Downloading segment (${startTime} - ${endTime})...`);
+      
+      // 2. Download Segment
+      const command = `yt-dlp -f "bestvideo+bestaudio/best" --merge-output-format mp4 --download-sections "*${startTime}-${endTime}" --force-keyframes-at-cuts -o "${outputPath}" "${url}" --force-overwrites`;
+      await execAsync(command);
+
+      console.log(`✅ [${fileName}] Saved.`);
+      return { success: true, file: fileName, path: outputPath };
+    } catch (e: any) {
+      console.error(`❌ Failed ${fileName}:`, e.message);
+      return { success: false, error: e.message };
     }
-    return { summary: `Downloaded ${results.filter(r => r.success).length} clips.`, results };
   },
 });
 
@@ -137,9 +139,9 @@ export const downloadImage = tool({
   }
 });
 
-// Simplified Layer Schema - made all fields optional and more permissive
+// Simplified Layer Schema
 const LayerSchema = z.object({
-  type: z.string(), // Changed from enum to string for flexibility
+  type: z.string(),
   path: z.string().optional(),
   text: z.string().optional(),
   color: z.string().optional(),
@@ -151,7 +153,7 @@ const LayerSchema = z.object({
   fontPath: z.string().optional(),
   textColor: z.string().optional(),
   fontSize: z.number().optional(),
-}).passthrough(); // Allow additional fields
+}).passthrough();
 
 const ClipSchema = z.object({
   duration: z.number().optional(),
@@ -160,7 +162,7 @@ const ClipSchema = z.object({
     name: z.string(), 
     duration: z.number().optional() 
   }).optional()
-}).passthrough(); // Allow additional fields
+}).passthrough();
 
 const AudioTrackSchema = z.object({
   path: z.string(),
@@ -188,7 +190,7 @@ export const renderVideo = tool({
           fontPath: z.string().optional()
         }).optional()
       }).optional()
-    }).passthrough() // Allow additional fields at spec level
+    }).passthrough()
   }),
   execute: async ({ spec }) => {
     const publicDir = path.join(process.cwd(), 'public', 'renders');
