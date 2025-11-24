@@ -3,6 +3,7 @@
 import { useChat } from '@ai-sdk/react';
 import { useState, useEffect } from 'react';
 import { Terminal, FolderOpen, Play, Trash2 } from 'lucide-react';
+import { DefaultChatTransport } from 'ai';
 import FileExplorer from '../components/FileExplorer';
 import SpecEditor from '../components/SpecEditor';
 
@@ -11,18 +12,18 @@ export default function DirectorConsole() {
   const [currentSpec, setCurrentSpec] = useState<any>(null);
   const [latestVideo, setLatestVideo] = useState<string | null>(null);
   const [videoKey, setVideoKey] = useState(0);
-
-  // 1. Manually manage the input state (Required for SDK 5)
   const [inputValue, setInputValue] = useState('');
 
-  // 2. Destructure 'sendMessage' instead of 'append'
-  const { messages, isLoading, sendMessage, setMessages } = useChat({
-    maxSteps: 20,
-    api: '/api/chat',
+  const { messages, status, sendMessage, setMessages } = useChat({
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+    }),
     onError: (e) => console.error("Chat Error:", e),
   });
 
-  // 3. Load History on Mount
+  const isLoading = status === 'streaming' || status === 'submitted';
+
+  // Load History on Mount
   useEffect(() => {
     fetch('/api/chat/history')
       .then(res => res.json())
@@ -40,44 +41,54 @@ export default function DirectorConsole() {
     setCurrentSpec(null);
   };
 
-  // 4. Smart State Sync (Detecting the Render Tool Result)
+  // Smart State Sync (Detecting the Render Tool Result)
   useEffect(() => {
     const reversedMessages = [...messages].reverse();
     for (const m of reversedMessages) {
-      if (m.toolInvocations) {
-        const renderResult = m.toolInvocations.find(
-          (inv) => inv.toolName === 'renderVideo' && inv.state === 'result'
-        );
-        if (renderResult && 'result' in renderResult) {
-          const result = renderResult.result as any;
-          if (result.success && result.url !== latestVideo) {
-            setLatestVideo(result.url);
-            setCurrentSpec(result.spec);
-            setVideoKey(prev => prev + 1);
-            break;
+      // In AI SDK 5, check parts for tool invocations
+      if (m.parts) {
+        for (const part of m.parts) {
+          if (part.type === 'tool-result' && (part as any).toolName === 'renderVideo') {
+            const result = (part as any).result;
+            if (result?.success && result.url !== latestVideo) {
+              setLatestVideo(result.url);
+              setCurrentSpec(result.spec);
+              setVideoKey(prev => prev + 1);
+              break;
+            }
           }
         }
       }
     }
   }, [messages, latestVideo]);
 
-  // 5. Custom Submit Handler
+  // Fixed Submit Handler
   const onSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!inputValue.trim()) return;
+    if (!inputValue.trim() || isLoading) return;
 
-    const userMessage = inputValue;
-    setInputValue(''); // Clear UI immediately
+    const userMessage = inputValue.trim();
+    setInputValue('');
 
-    // SDK v5: Use sendMessage with the string directly
-    await sendMessage(userMessage);
+    try {
+      await sendMessage({ text: userMessage });
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      setInputValue(userMessage);
+    }
   };
 
-  // 6. Manual Render Handler
+  // Manual Render Handler
   const handleManualRender = async () => {
-    if (!currentSpec) return;
+    if (!currentSpec || isLoading) return;
     
-    await sendMessage(`Re-render the video using this updated specification: ${JSON.stringify(currentSpec)}`);
+    try {
+      await sendMessage({ 
+        text: `Re-render the video using this updated specification: ${JSON.stringify(currentSpec)}` 
+      });
+    } catch (error) {
+      console.error('Failed to re-render:', error);
+    }
   };
 
   return (
@@ -114,15 +125,25 @@ export default function DirectorConsole() {
                   <div key={m.id} className={`text-xs ${m.role === 'user' ? 'text-blue-300' : 'text-zinc-400'}`}>
                     <span className="font-bold opacity-50 uppercase mb-1 block">{m.role}</span>
                     <div className="whitespace-pre-wrap">
-                      {/* Render Text Content */}
-                      {m.content}
+                      {m.parts.map((part, idx) => {
+                        if (part.type === 'text') {
+                          return <div key={idx}>{part.text}</div>;
+                        } else if (part.type === 'tool-call') {
+                          return (
+                            <div key={idx} className="mt-1 text-[10px] text-zinc-600 font-mono">
+                              ⚙️ {(part as any).toolName} (calling)
+                            </div>
+                          );
+                        } else if (part.type === 'tool-result') {
+                          return (
+                            <div key={idx} className="mt-1 text-[10px] text-zinc-500 font-mono">
+                              ✓ {(part as any).toolName} (complete)
+                            </div>
+                          );
+                        }
+                        return null;
+                      })}
                     </div>
-                    {/* Render Tools */}
-                    {m.toolInvocations?.map(t => (
-                      <div key={t.toolCallId} className="mt-1 text-[10px] text-zinc-600 font-mono">
-                        ⚙️ {t.toolName} ({t.state})
-                      </div>
-                    ))}
                   </div>
                 ))}
                 {isLoading && <div className="text-zinc-600 animate-pulse text-xs">Director is thinking...</div>}
@@ -135,6 +156,7 @@ export default function DirectorConsole() {
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Instruct..."
+                  disabled={isLoading}
                   onKeyDown={(e) => {
                     if(e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();

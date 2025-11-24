@@ -62,7 +62,7 @@ export const batchDownloadClips = tool({
 });
 
 export const generateVoiceover = tool({
-  description: 'Generates a voiceover audio file using Gemini 2.0 Flash TTS.',
+  description: 'Generates a voiceover audio file using Gemini 2.5 Flash TTS.',
   parameters: z.object({
     script: z.string().describe('The text to speak'),
     voiceName: z.enum(['Kore', 'Fenrir', 'Puck', 'Zephyr', 'Aoede']).default('Kore'),
@@ -77,25 +77,23 @@ export const generateVoiceover = tool({
 
     try {
       const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-      // Using Gemini 2.0 Flash Exp for TTS
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    contents: [{ parts: [{ text: script }] }],
-    generationConfig: {
-      responseModalities: ["AUDIO"],
-      speechConfig: {
-        voiceConfig: { 
-          prebuiltVoiceConfig: { 
-            // The 2.5 TTS model supports these voices: 'Kore', 'Fenrir', 'Puck', 'Zephyr', 'Aoede'
-            voiceName: voiceName 
-          } 
-        }
-      }
-    }
-  })
-});
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: script }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: { 
+                prebuiltVoiceConfig: { 
+                  voiceName: voiceName 
+                } 
+              }
+            }
+          }
+        })
+      });
 
       if (!response.ok) throw new Error(`TTS API Error: ${response.statusText}`);
       
@@ -127,7 +125,7 @@ export const downloadImage = tool({
     console.log(`🖼️ Downloading Image: ${url}`);
     
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) }); // 10s timeout
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) throw new Error(`Failed: ${res.status}`);
       const buffer = await res.arrayBuffer();
       fs.writeFileSync(outputPath, Buffer.from(buffer));
@@ -139,8 +137,9 @@ export const downloadImage = tool({
   }
 });
 
+// Simplified Layer Schema - made all fields optional and more permissive
 const LayerSchema = z.object({
-  type: z.enum(['video', 'audio', 'image', 'title', 'subtitle', 'news-title', 'slide-in-text', 'fill-color', 'pause', 'radial-gradient', 'linear-gradient', 'rainbow-colors', 'canvas', 'fabric', 'gl']),
+  type: z.string(), // Changed from enum to string for flexibility
   path: z.string().optional(),
   text: z.string().optional(),
   color: z.string().optional(),
@@ -149,13 +148,27 @@ const LayerSchema = z.object({
   height: z.number().optional(),
   start: z.number().optional(),
   stop: z.number().optional(),
-});
+  fontPath: z.string().optional(),
+  textColor: z.string().optional(),
+  fontSize: z.number().optional(),
+}).passthrough(); // Allow additional fields
 
 const ClipSchema = z.object({
   duration: z.number().optional(),
   layers: z.array(LayerSchema),
-  transition: z.object({ name: z.string(), duration: z.number().optional() }).optional()
-});
+  transition: z.object({ 
+    name: z.string(), 
+    duration: z.number().optional() 
+  }).optional()
+}).passthrough(); // Allow additional fields
+
+const AudioTrackSchema = z.object({
+  path: z.string(),
+  mixVolume: z.number().optional(),
+  start: z.number().optional(),
+  cutFrom: z.number().optional(),
+  cutTo: z.number().optional()
+}).passthrough();
 
 export const renderVideo = tool({
   description: 'Renders the final video using the Editly engine.',
@@ -165,8 +178,17 @@ export const renderVideo = tool({
       height: z.number().default(1920),
       fps: z.number().default(30),
       clips: z.array(ClipSchema),
-      audioTracks: z.array(z.object({ path: z.string(), mixVolume: z.number().optional() })).optional()
-    })
+      audioTracks: z.array(AudioTrackSchema).optional(),
+      defaults: z.object({
+        transition: z.object({
+          name: z.string(),
+          duration: z.number().optional()
+        }).optional(),
+        layer: z.object({
+          fontPath: z.string().optional()
+        }).optional()
+      }).optional()
+    }).passthrough() // Allow additional fields at spec level
   }),
   execute: async ({ spec }) => {
     const publicDir = path.join(process.cwd(), 'public', 'renders');
